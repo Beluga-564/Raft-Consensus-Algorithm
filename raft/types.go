@@ -29,6 +29,31 @@ func (r Role) String() string {
 	return "unknown"
 }
 
+type LogEntry struct {
+	Term  int
+	Index int
+}
+
+type RequestVoteArgs struct {
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+type RequestVoteReply struct {
+	Term        int
+	VoteGranted bool
+}
+
+type Transport interface {
+	SendRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) bool
+}
+
+type Handler interface {
+	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
+}
+
 type Raft struct {
 	mu       sync.Mutex
 	me       int // my node ID
@@ -37,6 +62,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // None if no vote cast this term
 	role        Role
+	leaderID    int // None until a leader is known
 
 	// electionDeadline is when this node gives up on the current leader.
 	// Re-randomized on every reset -- see resetElectionDeadline.
@@ -44,4 +70,7 @@ type Raft struct {
 
 	dead  atomic.Bool
 	debug bool
+
+	log       []LogEntry // 1-indexed; log[0] is a {Term: 0} sentinel
+	transport Transport
 }

@@ -53,7 +53,7 @@ func TestStartStop(t *testing.T) {
 
 	nodes := make([]*Raft, n)
 	for i := range nodes {
-		nodes[i] = Make(i, n)
+		nodes[i] = Make(i, n, nopTransport{})
 	}
 
 	for i, r := range nodes {
@@ -87,7 +87,7 @@ func TestStartStop(t *testing.T) {
 // Kill must be safe from many goroutines at once, and idempotent -- every
 // ticker and replication goroutine from Task 2 onward races on it.
 func TestKillIsConcurrentSafeAndIdempotent(t *testing.T) {
-	r := Make(0, 3)
+	r := Make(0, 3, nopTransport{})
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -112,7 +112,7 @@ func TestMajority(t *testing.T) {
 	for _, tc := range []struct{ numPeers, want int }{
 		{1, 1}, {2, 2}, {3, 2}, {4, 3}, {5, 3}, {6, 4}, {7, 4},
 	} {
-		r := Make(0, tc.numPeers)
+		r := Make(0, tc.numPeers, nopTransport{})
 		if got := r.Majority(); got != tc.want {
 			t.Errorf("numPeers=%d: Majority() = %d, want %d", tc.numPeers, got, tc.want)
 		}
@@ -129,14 +129,14 @@ func TestMakeRejectsBadIDs(t *testing.T) {
 					t.Errorf("Make(%d, %d): want panic, got none", tc.me, tc.numPeers)
 				}
 			}()
-			Make(tc.me, tc.numPeers)
+			Make(tc.me, tc.numPeers, nopTransport{})
 		}()
 	}
 }
 
 func TestDlogRespectsDebugFlag(t *testing.T) {
 	out := captureLogs(t)
-	r := Make(1, 3)
+	r := Make(1, 3, nopTransport{})
 
 	r.debug = false
 	r.dlog("this must not appear %d", 1)
@@ -179,7 +179,7 @@ func TestElectionTimeoutIsRandomized(t *testing.T) {
 // resetElectionDeadline must push the deadline into the future -- a node whose
 // deadline stays in the past would log a timeout on every single tick.
 func TestResetElectionDeadlineArmsTheFuture(t *testing.T) {
-	r := Make(0, 3)
+	r := Make(0, 3, nopTransport{})
 
 	for i := 0; i < 20; i++ {
 		before := time.Now()
@@ -200,7 +200,7 @@ func TestResetElectionDeadlineArmsTheFuture(t *testing.T) {
 func TestTickerNoticesTimeouts(t *testing.T) {
 	out := captureLogs(t)
 
-	r := Make(0, 3)
+	r := Make(0, 3, nopTransport{})
 	r.debug = true
 	r.resetElectionDeadline() // discount setup time
 	r.Start()
@@ -218,7 +218,7 @@ func TestTickerNoticesTimeouts(t *testing.T) {
 func TestTickerIgnoresDeadlineWhenLeader(t *testing.T) {
 	out := captureLogs(t)
 
-	r := Make(0, 3)
+	r := Make(0, 3, nopTransport{})
 	r.debug = true
 	r.role = Leader
 	r.Start()
@@ -265,7 +265,7 @@ func TestTickerExitsAfterKill(t *testing.T) {
 	out := captureLogs(t)
 	base := settledGoroutines()
 
-	r := Make(0, 3)
+	r := Make(0, 3, nopTransport{})
 	r.debug = true
 	r.Start()
 
@@ -291,3 +291,9 @@ func TestTickerExitsAfterKill(t *testing.T) {
 			runtime.NumGoroutine(), base)
 	}
 }
+
+// nopTransport lets white-box tests drive the ticker without a cluster:
+// every RPC reports itself dropped.
+type nopTransport struct{}
+
+func (nopTransport) SendRequestVote(int, *RequestVoteArgs, *RequestVoteReply) bool { return false }

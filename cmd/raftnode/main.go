@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pankaj/raft-go/raft"
+	"github.com/pankaj/raft-go/transport"
 )
 
 const (
@@ -18,9 +19,12 @@ func main() {
 	// of interleaved node output is usually the thing you need most.
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
+	net := transport.NewMemoryTransport(clusterSize)
+
 	nodes := make([]*raft.Raft, clusterSize)
 	for i := range nodes {
-		nodes[i] = raft.Make(i, clusterSize)
+		nodes[i] = raft.Make(i, clusterSize, net.Node(i))
+		net.Register(i, nodes[i])
 	}
 	for _, r := range nodes {
 		r.Start()
@@ -32,6 +36,9 @@ func main() {
 
 	for _, r := range nodes {
 		r.Kill()
+	}
+	for i, r := range nodes {
+		fmt.Printf("node %d: %s, term %d, leader %d\n", i, r.Role(), r.Term(), r.LeaderID())
 	}
 	fmt.Println("all nodes shut down")
 }

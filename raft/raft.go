@@ -14,7 +14,7 @@ const (
 	ElectionTimeoutMax = 600 * time.Millisecond
 )
 
-func Make(me, numPeers int) *Raft {
+func Make(me, numPeers int, transport Transport) *Raft {
 	if numPeers <= 0 {
 		panic("raft: numPeers must be positive")
 	}
@@ -23,6 +23,12 @@ func Make(me, numPeers int) *Raft {
 	}
 
 	// mu and dead are usable at their zero values.
+	entries := make([]LogEntry, 1)
+	entries[0] = LogEntry{
+		Term:  0,
+		Index: 0,
+	}
+
 	r := &Raft{
 		me:       me,
 		numPeers: numPeers,
@@ -30,8 +36,11 @@ func Make(me, numPeers int) *Raft {
 		currentTerm: 0,
 		votedFor:    None,
 		role:        Follower,
+		leaderID:    None,
 
-		debug: os.Getenv("RAFT_DEBUG") != "",
+		debug:     os.Getenv("RAFT_DEBUG") != "",
+		log:       entries,
+		transport: transport,
 	}
 
 	r.resetElectionDeadline()
@@ -52,6 +61,24 @@ func (r *Raft) Killed() bool {
 	return r.dead.Load()
 }
 
+func (r *Raft) Role() Role {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.role
+}
+
+func (r *Raft) Term() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentTerm
+}
+
+func (r *Raft) LeaderID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.leaderID
+}
+
 func (r *Raft) Majority() int {
 	return r.numPeers/2 + 1
 }
@@ -68,7 +95,7 @@ func (r *Raft) ticker() {
 		r.mu.Lock()
 		if r.role != Leader && time.Now().After(r.electionDeadline) {
 			r.dlog("election timeout")
-			r.resetElectionDeadline()
+			r.startElection()
 		}
 		r.mu.Unlock()
 	}

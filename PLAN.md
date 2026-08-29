@@ -48,25 +48,38 @@ Raft has ~5 parts. In 20 hours you build three properly and *understand* the oth
 
 ### File layout
 
+Every file is annotated with the task that creates it. Nothing here is created early — a file appears in the task that first needs it.
+
 ```
 raft-go/
 ├── go.mod
 ├── raft/
-│   ├── raft.go          # Raft struct, Make, Kill, ticker
-│   ├── election.go      # RequestVote + candidate logic
-│   ├── replication.go   # AppendEntries + leader logic
-│   ├── apply.go         # commit advance + applier goroutine
-│   ├── persist.go       # durable state
-│   └── *_test.go
+│   ├── types.go              # T1  every type and const in the package
+│   ├── raft.go               # T1  Make, Run, Kill, ticker, becomeFollower
+│   ├── election.go           # T3  RequestVote + candidate logic
+│   ├── replication.go        # T4  AppendEntries + leader logic
+│   ├── apply.go              # T6  commit advance + applier goroutine
+│   ├── persist.go            # T7  durable state
+│   ├── raft_test.go          # T1  package raft      -- white-box unit tests
+│   └── cluster_test.go       # T10 package raft_test -- multi-node tests
 ├── transport/
-│   ├── memory.go        # in-process, partition-simulating
-│   └── tcp.go           # net/rpc
+│   ├── memory.go             # T3  in-process, partition-simulating
+│   └── tcp.go                # T8  net/rpc
 ├── kv/
-│   ├── store.go
-│   └── server.go
-├── cmd/raftnode/main.go
-└── README.md
+│   ├── store.go              # T9
+│   └── server.go             # T9
+├── cmd/raftnode/main.go      # T1, grown in T2, T8, T9
+├── scripts/demo.sh           # T11
+└── README.md                 # T11
 ```
+
+Between Tasks 3 and 9 the multi-node tests live in per-feature files — `election_test.go`, `replication_test.go`, `apply_test.go`, `persist_test.go` — all in `package raft_test`. Task 10 folds them into `cluster_test.go`.
+
+**Three rules that keep this from drifting:**
+
+1. **Types in `types.go`, behaviour in the feature file.** Almost every task adds fields to `Raft` and types to `types.go`, then puts the logic in the file named for the feature. Skip this and `raft.go` is 900 lines by Task 6.
+2. **`raft` imports nothing of yours.** `transport` and `kv` import `raft`; never the reverse. That one-way edge is what lets Task 8 add TCP without touching the algorithm.
+3. **Two test packages, deliberately.** `package raft` for tests that read unexported state; `package raft_test` for anything that needs a `MemoryTransport`. Rule 2 is exactly why: `transport` imports `raft`, so an in-package test importing `transport` is a cycle. See Task 3.
 
 ---
 
@@ -77,6 +90,13 @@ raft-go/
 ## Task 1 — Skeleton, node lifecycle, logging (1h)
 
 **Goal:** three nodes start, announce themselves, and shut down cleanly. No consensus yet.
+
+### Files
+
+- **`raft/types.go`** (new) — `None`, `Role` + its `String()`, the `Raft` struct
+- **`raft/raft.go`** (new) — `Make`, `Kill`, `Killed`, `Majority`, `dlog`
+- **`raft/raft_test.go`** (new, `package raft`) — `TestStartStop`
+- **`cmd/raftnode/main.go`** (new) — construct N nodes, `Kill` them
 
 ### New types
 
@@ -141,6 +161,15 @@ type Raft struct {
 
 **Goal:** each node independently notices "I haven't heard from a leader" on a randomized schedule. Still no networking.
 
+### Files
+
+- **`raft/types.go`** (edit) — add `electionDeadline time.Time` to `Raft`
+- **`raft/raft.go`** (edit) — the three timing constants, `Run`, `ticker`, `randomElectionTimeout`, `resetElectionDeadline`
+- **`raft/raft_test.go`** (edit) — the randomization and ticker tests
+- **`cmd/raftnode/main.go`** (edit) — `Run` each node, sleep, then `Kill`
+
+Pulling `randomElectionTimeout()` out as its own function pays for itself immediately: the draw can then be asserted exactly, with no tolerance needed for time spent inside the call.
+
 ### New types
 
 ```go
@@ -180,6 +209,18 @@ electionDeadline time.Time
 ## Task 3 — Leader election (2.5h) ⚠️
 
 **Goal:** a 3-node cluster elects a leader. Leadership is *not* yet maintained — nodes will keep timing out and starting fresh elections, and terms will climb. That is expected and fine, because the property you can already test is the important one: **never two leaders in the same term.**
+
+### Files
+
+- **`raft/types.go`** (edit) — `LogEntry`, `RequestVoteArgs`, `RequestVoteReply`, the `Transport` and `Handler` interfaces; add `log` and `transport` to `Raft`
+- **`raft/election.go`** (new) — `startElection`, the `RequestVote` handler, `lastLogIndex`, `lastLogTerm`, `isUpToDate`
+- **`raft/raft.go`** (edit) — `becomeFollower`; seed the 1-indexed log in `Make`; point the `ticker` timeout branch at `startElection`
+- **`transport/memory.go`** (new) — `MemoryTransport`, `Connect`, `Disconnect`
+- **`raft/election_test.go`** (new, **`package raft_test`**) — the three election tests
+
+`becomeFollower` belongs in `raft.go`, not `election.go`: every later task calls it, so it sits with the core lifecycle rather than with candidate logic.
+
+⚠️ **Cluster tests must be `package raft_test`, not `package raft`.** `transport` imports `raft` for the RPC types, so an in-package test that imports `transport` is a cycle — Go rejects it outright with `import cycle not allowed in test`. The external test package (same directory, `package raft_test`) breaks it. The cost is that it sees only *exported* identifiers, which makes this the task to add the accessors Task 9 needs anyway — `Role()`, `Term()`, `LeaderID()`, each taking `mu`. White-box unit tests stay in `package raft`; anything needing a `MemoryTransport` goes external.
 
 ### New types
 
@@ -291,6 +332,15 @@ In `transport/memory.go`: a registry of `Handler`s plus `connected []bool`.
 
 **Goal:** the leader suppresses further elections. One leader, stable term, and clean failover.
 
+### Files
+
+- **`raft/types.go`** (edit) — `AppendEntriesArgs`/`Reply`, `HeartbeatInterval`, the new `Transport`/`Handler` methods, `leaderID` on `Raft`
+- **`raft/replication.go`** (new) — the heartbeat loop and the `AppendEntries` handler
+- **`raft/election.go`** (edit) — on winning, set `leaderID = rf.me` and launch the heartbeat loop
+- **`raft/raft.go`** (edit) — `becomeFollower` also clears `leaderID` to `None`
+- **`transport/memory.go`** (edit) — route the new RPC
+- **`raft/election_test.go`** (edit) — stability and failover tests
+
 ### New types
 
 ```go
@@ -355,6 +405,15 @@ Update `MemoryTransport` to route the new RPC. Set `leaderID = None` inside `bec
 ## Task 5 — Log replication (3h) ⚠️ hardest task
 
 **Goal:** the leader accepts commands and every follower's log converges to match, byte for byte.
+
+### Files
+
+- **`raft/types.go`** (edit) — `Command` on `LogEntry`, the four new `AppendEntriesArgs` fields, `nextIndex`/`matchIndex`/`commitIndex` on `Raft`
+- **`raft/replication.go`** (edit) — `Start(command any)`, the consistency check, truncate-and-append, leader-side replication
+- **`raft/election.go`** (edit) — initialize `nextIndex`/`matchIndex` on an election win
+- **`raft/replication_test.go`** (new, `package raft_test`) — the three replication tests
+
+⚠️ **Name collision to settle before you start.** This task’s client entry point is `Start(command any)`, but Task 2 already used `Start()` for launching the background goroutines. Rename the launcher to `Run()` first — doing it midway through a half-written replication path is strictly worse.
 
 ### Changes to existing types
 
@@ -424,6 +483,14 @@ commitIndex int
 
 **Goal:** entries replicated to a majority get committed and handed to a state machine, in the same order on every node.
 
+### Files
+
+- **`raft/types.go`** (edit) — `ApplyMsg`; `lastApplied`, `applyCh`, `applyCond` on `Raft`
+- **`raft/apply.go`** (new) — the applier goroutine and `advanceCommitIndex`, which is where the Figure 8 rule lives
+- **`raft/replication.go`** (edit) — signal `applyCond` wherever `commitIndex` moves, on both the leader and the follower path
+- **`raft/raft.go`** (edit) — build `applyCond` in `Make`, launch the applier from `Run`
+- **`raft/apply_test.go`** (new, `package raft_test`) — ordering, quorum, and the partitioned-leader test
+
 ### New types
 
 ```go
@@ -486,6 +553,16 @@ Omit it and every test you've written still passes while the cluster silently lo
 
 **Goal:** a node that crashes and restarts does not forget what it promised.
 
+### Files
+
+- **`raft/persist.go`** (new) — `persistentState`, `persist()`, `readPersist()`
+- **`raft/raft.go`** (edit) — `readPersist()` from `Make`; `persist()` at the end of `becomeFollower`
+- **`raft/election.go`** (edit) — `persist()` after granting a vote and after incrementing the term
+- **`raft/replication.go`** (edit) — `persist()` after appending to the log
+- **`raft/persist_test.go`** (new, `package raft_test`)
+
+Persistence is cross-cutting: the new file is small, and most of the work is the four call sites spread across three existing files. Grep for every write to `currentTerm`, `votedFor`, and `log` to confirm you caught them all.
+
 ### New types
 
 ```go
@@ -523,6 +600,14 @@ Only these three fields are persistent. `commitIndex` is deliberately volatile �
 
 **Goal:** three real OS processes, so you can kill one with `Ctrl-C`.
 
+### Files
+
+- **`transport/tcp.go`** (new) — `TCPTransport`
+- **`cmd/raftnode/main.go`** (edit) — the `--id`, `--peers`, `--http`, `--debug` flags; register the RPC receiver and serve
+- **`scripts/demo.sh`** (edit) — launch the three processes
+
+**No changes to the `raft` package.** That is the test of Task 3’s abstraction: if you find yourself editing `raft/` here, the `Transport` interface has a leak worth fixing rather than working around.
+
 ### New types
 
 `transport/tcp.go` — a `TCPTransport` implementing the existing `Transport` interface with `net/rpc`. No changes to the `raft` package at all; this is the payoff for Task 3's abstraction.
@@ -555,6 +640,15 @@ Three terminals, three processes. Assert via the debug log that exactly one lead
 ## Task 9 — KV store and HTTP API (2h)
 
 **Goal:** the thing that makes this a *project* rather than a library.
+
+### Files
+
+- **`kv/store.go`** (new) — `OpKind`, `Command`, `Result`, the map, and `func init() { gob.Register(Command{}) }`
+- **`kv/server.go`** (new) — `Server`, `Status`, the `applyCh` drain loop, the HTTP handlers
+- **`raft/raft.go`** (edit) — the exported accessors `/status` needs: `LeaderID()`, `Role()`, `Term()`, `CommitIndex()`, `LogLength()`, each taking `mu`
+- **`cmd/raftnode/main.go`** (edit) — construct the `kv.Server` and serve HTTP
+
+If you added those accessors back in Task 3 for the external test package, they already exist and this line is free.
 
 ### New types
 
@@ -632,6 +726,14 @@ func init() { gob.Register(Command{}) }
 
 **Goal:** the tests are your credibility. Tighten what you wrote per-task into a suite you can paste into the README.
 
+### Files
+
+- **`raft/raft_test.go`** (`package raft`) — keep the white-box unit tests here
+- **`raft/cluster_test.go`** (new, `package raft_test`) — the `cluster` helper: `makeCluster`, `disconnect`, `connect`, `checkOneLeader`, `checkLogsMatch`
+- fold `election_test.go`, `replication_test.go`, `apply_test.go`, and `persist_test.go` into `raft/cluster_test.go`
+
+Consolidate *within* each test package, never across them: internal unit tests cannot merge with external cluster tests, for the import-cycle reason in Task 3. Two files is the floor, not a compromise.
+
 ### Logic
 
 - Consolidate into `raft/raft_test.go` with a `cluster` helper: `makeCluster(n)`, `disconnect(i)`, `connect(i)`, `checkOneLeader()`, `checkLogsMatch()`.
@@ -649,6 +751,12 @@ func init() { gob.Register(Command{}) }
 ## Task 11 — README and demo (2h)
 
 Resumes get 20 seconds of attention. **The README is the project.**
+
+### Files
+
+- **`README.md`** (new)
+- **`scripts/demo.sh`** (edit) — the script you actually record
+- **`docs/`** (new, optional) — somewhere to keep the GIF or asciinema cast
 
 ### Include
 
