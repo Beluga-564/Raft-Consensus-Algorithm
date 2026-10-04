@@ -297,3 +297,6 @@ func TestTickerExitsAfterKill(t *testing.T) {
 type nopTransport struct{}
 
 func (nopTransport) SendRequestVote(int, *RequestVoteArgs, *RequestVoteReply) bool { return false }
+func (nopTransport) SendAppendEntries(int, *AppendEntriesArgs, *AppendEntriesReply) bool {
+	return false
+}

@@ -17,6 +17,8 @@ const (
 	Leader
 )
 
+const HeartBeatInterval = 50 * time.Millisecond
+
 func (r Role) String() string {
 	switch r {
 	case Follower:
@@ -48,10 +50,12 @@ type RequestVoteReply struct {
 
 type Transport interface {
 	SendRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) bool
+	SendAppendEntries(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool
 }
 
 type Handler interface {
 	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error
+	AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error
 }
 
 type Raft struct {
@@ -73,4 +77,14 @@ type Raft struct {
 
 	log       []LogEntry // 1-indexed; log[0] is a {Term: 0} sentinel
 	transport Transport
+}
+
+type AppendEntriesArgs struct {
+	Term int
+	LeaderID int
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
 }

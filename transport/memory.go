@@ -77,13 +77,23 @@ type memoryPeer struct {
 }
 
 func (p *memoryPeer) SendRequestVote(peer int, args *raft.RequestVoteArgs, reply *raft.RequestVoteReply) bool {
+	return p.call(peer, func(h raft.Handler) error { return h.RequestVote(args, reply) })
+}
+
+func (p *memoryPeer) SendAppendEntries(peer int, args *raft.AppendEntriesArgs, reply *raft.AppendEntriesReply) bool {
+	return p.call(peer, func(h raft.Handler) error { return h.AppendEntries(args, reply) })
+}
+
+// call delivers one RPC to peer after a random delay, so goroutine
+// interleavings vary between runs.
+func (p *memoryPeer) call(peer int, rpc func(raft.Handler) error) bool {
 	time.Sleep(minDelay + time.Duration(rand.Int63n(int64(maxDelay-minDelay))))
 
 	h := p.net.deliver(p.id, peer)
 	if h == nil {
 		return false
 	}
-	if err := h.RequestVote(args, reply); err != nil {
+	if err := rpc(h); err != nil {
 		return false
 	}
 	// A partition can form while the call is in flight; the reply is then lost.

@@ -49,6 +49,7 @@ func (rf *Raft) startElection() {
 			if votes == rf.Majority() {
 				rf.role = Leader
 				rf.leaderID = rf.me
+				go rf.HeartbeatLoop(rf.currentTerm)
 				rf.dlog("became leader with %d votes", votes)
 			}
 		}(peer)
